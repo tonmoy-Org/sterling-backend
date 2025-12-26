@@ -52,32 +52,30 @@ const register = async (req, res) => {
 const login = async (req, res) => {
   try {
     const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res
-        .status(400)
-        .json({ success: false, message: 'Please provide email and password' });
-    }
-
     const user = await User.findOne({ email }).select('+password');
-    if (!user) {
-      return res
-        .status(400)
-        .json({ success: false, message: 'Invalid credentials' });
-    }
 
-    const isMatch = await user.matchPassword(password);
-    if (!isMatch) {
-      return res
-        .status(400)
-        .json({ success: false, message: 'Invalid credentials' });
+    if (!user || !(await user.matchPassword(password))) {
+      return res.status(400).json({ success: false, message: 'Invalid credentials' });
     }
 
     if (!user.isActive) {
-      return res
-        .status(403)
-        .json({ success: false, message: 'User account is inactive' });
+      return res.status(403).json({ success: false, message: 'User account is inactive' });
     }
+
+    // ---- DEVICE SAVE LOGIC START ----
+    const deviceInfo = req.body.device; // Frontend must send device info inside request
+
+    const existingDevice = user.devices.find(d => d.deviceId === deviceInfo.deviceId);
+
+    if (!existingDevice) {
+      // New device detected
+      if (user.devices.length >= 5) {
+        user.devices.shift(); // remove oldest
+      }
+      user.devices.push(deviceInfo);
+      await user.save();
+    }
+    // ---- DEVICE SAVE LOGIC END ----
 
     const token = generateToken(user._id, user.role);
 
@@ -85,17 +83,15 @@ const login = async (req, res) => {
       success: true,
       message: 'Login successful',
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-      },
+      user: { id: user._id, name: user.name, email: user.email, role: user.role },
+      devices: user.devices,
     });
+
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 
 const getMe = async (req, res) => {
   try {
@@ -125,20 +121,20 @@ const getMe = async (req, res) => {
 const updateProfile = async (req, res) => {
   try {
     const { name, email } = req.body;
-    
+
     // Find user by ID from auth middleware
     const user = await User.findById(req.user.id);
-    
+
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
-    
+
     // Update user
     user.name = name || user.name;
     user.email = email || user.email;
-    
+
     await user.save();
-    
+
     res.status(200).json({
       success: true,
       user: {
@@ -157,25 +153,25 @@ const updateProfile = async (req, res) => {
 const changePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
-    
+
     const user = await User.findById(req.user.id);
-    
+
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
-    
+
     // Check current password
     const isMatch = await bcrypt.compare(currentPassword, user.password);
     if (!isMatch) {
       return res.status(400).json({ success: false, message: 'Current password is incorrect' });
     }
-    
+
     // Hash new password
     const salt = await bcrypt.genSalt(10);
     user.password = await bcrypt.hash(newPassword, salt);
-    
+
     await user.save();
-    
+
     res.status(200).json({ success: true, message: 'Password changed successfully' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
