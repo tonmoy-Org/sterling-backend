@@ -1,10 +1,27 @@
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
 const User = require('../models/User');
 
 const generateToken = (id, role) => {
   return jwt.sign({ id, role }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRE,
   });
+};
+
+// Helper function to format user response consistently
+const formatUserResponse = (user) => {
+  return {
+    id: user._id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    department: user.department,
+    isActive: user.isActive,
+    devices: user.devices || [],
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+    __v: user.__v
+  };
 };
 
 const register = async (req, res) => {
@@ -37,12 +54,7 @@ const register = async (req, res) => {
       success: true,
       message: 'User registered successfully',
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-      },
+      user: formatUserResponse(user),
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -63,7 +75,7 @@ const login = async (req, res) => {
     }
 
     // ---- DEVICE SAVE LOGIC START ----
-    const deviceInfo = req.body.device; // Frontend must send device info inside request
+    const deviceInfo = req.body.device;
 
     const existingDevice = user.devices.find(d => d.deviceId === deviceInfo.deviceId);
 
@@ -83,15 +95,13 @@ const login = async (req, res) => {
       success: true,
       message: 'Login successful',
       token,
-      user: { id: user._id, name: user.name, email: user.email, role: user.role },
-      devices: user.devices,
+      user: formatUserResponse(user),
     });
 
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
 
 const getMe = async (req, res) => {
   try {
@@ -104,25 +114,17 @@ const getMe = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        department: user.department,
-      },
+      user: formatUserResponse(user),
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// In your authController.js
 const updateProfile = async (req, res) => {
   try {
     const { name, email } = req.body;
 
-    // Find user by ID from auth middleware
     const user = await User.findById(req.user.id);
 
     if (!user) {
@@ -137,13 +139,7 @@ const updateProfile = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        department: user.department,
-      },
+      user: formatUserResponse(user),
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

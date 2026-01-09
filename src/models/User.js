@@ -2,24 +2,58 @@ const mongoose = require('mongoose');
 const bcryptjs = require('bcryptjs');
 
 const deviceSchema = new mongoose.Schema({
-  deviceId: { type: String, required: true, unique: true },
-  browser: String,
-  browserVersion: String,
-  os: String,
-  osVersion: String,
-  deviceType: String,
-  date: Date,
+  deviceId: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  browser: {
+    type: String
+  },
+  browserVersion: {
+    type: String
+  },
+  os: {
+    type: String
+  },
+  osVersion: {
+    type: String
+  },
+  deviceType: {
+    type: String
+  },
+  date: {
+    type: Date
+  }
 });
 
 const userSchema = new mongoose.Schema(
   {
-    name: String,
-    email: String,
-    password: { type: String, select: false },
-    role: { type: String, enum: ['superadmin', 'manager', 'tech'], default: 'tech' },
-    isActive: Boolean,
-    department: String,
-    devices: { type: [deviceSchema], default: [] },
+    name: {
+      type: String
+    },
+    email: {
+      type: String
+    },
+    password: {
+      type: String,
+      select: false
+    },
+    role: {
+      type: String,
+      enum: ['superadmin', 'manager', 'tech'],
+      default: 'tech'
+    },
+    isActive: {
+      type: Boolean
+    },
+    department: {
+      type: String
+    },
+    devices: {
+      type: [deviceSchema],
+      default: []
+    }
   },
   { timestamps: true }
 );
