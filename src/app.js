@@ -10,7 +10,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: 'http://localhost:5173',
+    origin: 'https://sterling-dashboard-eta.vercel.app' ,
     credentials: true,
   })
 );
