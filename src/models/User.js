@@ -5,6 +5,10 @@ const deviceSchema = new mongoose.Schema({
   browser: {
     type: String
   },
+  deviceId: {
+    type: String,
+    required: true
+  },
   browserVersion: {
     type: String
   },

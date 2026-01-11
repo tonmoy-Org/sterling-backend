@@ -42,13 +42,13 @@ const syncAssignedDashboard = async (req, res) => {
     try {
         const data = await assignedLocatesDispatchBoard();
         console.log('Scraped Data:', data);
-        // const saved = await DashboardData.create(data);
+        const saved = await DashboardData.create(data);
 
-        // res.json({
-        //     success: true,
-        //     message: 'Dashboard synced successfully',
-        //     data: saved
-        // });
+        res.json({
+            success: true,
+            message: 'Dashboard synced successfully',
+            data: saved
+        });
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -89,8 +89,9 @@ const deleteWorkOrder = async (req, res) => {
 };
 
 const bulkDeleteWorkOrders = async (req, res) => {
+    const { ids } = req.body;
+    console.log('=== bulkDeleteWorkOrders ===');
     try {
-        const { ids } = req.body;
 
         if (!Array.isArray(ids) || ids.length === 0) {
             return res.status(400).json({
@@ -135,14 +136,20 @@ const bulkDeleteWorkOrders = async (req, res) => {
     }
 };
 
-// NEW: Update call status for excavator locates
 const updateWorkOrderCallStatus = async (req, res) => {
     try {
         const { id } = req.params;
-        const { locatesCalled, callType, calledAt, calledBy } = req.body;
-        console.log('updateWorkOrderCallStatus', req.body);
+        const { locatesCalled, callType, calledAt } = req.body;
 
-        // Validate input
+        console.log(`=== updateWorkOrderCallStatus ===`);
+        console.log(`User: ${req.user?.name || 'Unknown'}`);
+        console.log(`User email: ${req.user?.email || 'No email'}`);
+        console.log(`Body:`, req.body);
+
+        // Get manager info from authenticated user
+        const calledByName = req.user?.name || req.body.calledBy || 'Unknown Manager';
+        const calledByEmail = req.user?.email || req.body.calledByEmail || 'unknown@email.com';
+
         if (typeof locatesCalled !== 'boolean') {
             return res.status(400).json({
                 success: false,
@@ -157,19 +164,13 @@ const updateWorkOrderCallStatus = async (req, res) => {
             });
         }
 
-        if (locatesCalled && !calledBy) {
-            return res.status(400).json({
-                success: false,
-                message: "Manager name (calledBy) is required when marking locates as called"
-            });
-        }
-
         // Find the dashboard containing the work order
         const dashboard = await DashboardData.findOne({
             "workOrders._id": id
         });
 
         if (!dashboard) {
+            console.log(`Work order ${id} not found in any dashboard`);
             return res.status(404).json({
                 success: false,
                 message: "Work order not found"
@@ -182,77 +183,88 @@ const updateWorkOrderCallStatus = async (req, res) => {
         );
 
         if (workOrderIndex === -1) {
+            console.log(`Work order ${id} not found in dashboard workOrders array`);
             return res.status(404).json({
                 success: false,
                 message: "Work order not found in dashboard"
             });
         }
 
+        // Get the work order
+        const workOrder = dashboard.workOrders[workOrderIndex];
+        console.log(`Found work order: ${workOrder.workOrderNumber}`);
+
         // Update the work order
-        dashboard.workOrders[workOrderIndex].locatesCalled = locatesCalled;
-        
+        workOrder.locatesCalled = locatesCalled;
+
         if (callType) {
-            dashboard.workOrders[workOrderIndex].callType = callType.toUpperCase();
+            workOrder.callType = callType.toUpperCase();
+            workOrder.type = callType.toUpperCase(); // Also update the type field
         }
-        
-        if (calledBy) {
-            dashboard.workOrders[workOrderIndex].calledBy = calledBy;
-        }
-        
-        if (calledAt) {
-            dashboard.workOrders[workOrderIndex].calledAt = calledAt;
-        } else if (locatesCalled) {
-            // Auto-set calledAt if not provided but locatesCalled is true
-            dashboard.workOrders[workOrderIndex].calledAt = new Date().toISOString();
-        }
+
+        // Set caller information
+        workOrder.calledBy = calledByName;
+        workOrder.calledByEmail = calledByEmail;
+
+        // Set calledAt time
+        const calledAtDate = calledAt ? new Date(calledAt) : new Date();
+        workOrder.calledAt = calledAtDate;
 
         // Calculate completion date based on call type
-        if (locatesCalled && callType) {
-            const calledDate = new Date(dashboard.workOrders[workOrderIndex].calledAt);
-            if (callType.toUpperCase() === 'EMERGENCY') {
-                // Emergency: 4 hours from called time
-                dashboard.workOrders[workOrderIndex].completionDate = new Date(calledDate.getTime() + (4 * 60 * 60 * 1000));
-            } else {
-                // Standard: 2 business days from called time
-                // Simple implementation - for production, use a proper business days library
-                const completionDate = new Date(calledDate);
-                let businessDays = 2;
-                while (businessDays > 0) {
-                    completionDate.setDate(completionDate.getDate() + 1);
-                    // Skip weekends (0 = Sunday, 6 = Saturday)
-                    if (completionDate.getDay() !== 0 && completionDate.getDay() !== 6) {
-                        businessDays--;
-                    }
+        if (callType?.toUpperCase() === 'EMERGENCY') {
+            // Emergency: 4 hours from called time
+            workOrder.completionDate = new Date(calledAtDate.getTime() + (4 * 60 * 60 * 1000));
+            console.log(`Emergency locate - Completion in 4 hours`);
+        } else {
+            // Standard: 2 business days from called time
+            const completionDate = new Date(calledAtDate);
+            let businessDays = 2;
+
+            while (businessDays > 0) {
+                completionDate.setDate(completionDate.getDate() + 1);
+
+                // Skip weekends (0 = Sunday, 6 = Saturday)
+                if (completionDate.getDay() !== 0 && completionDate.getDay() !== 6) {
+                    businessDays--;
                 }
-                dashboard.workOrders[workOrderIndex].completionDate = completionDate;
             }
+
+            workOrder.completionDate = completionDate;
+            console.log(`Standard locate - Completion in 2 business days: ${completionDate}`);
         }
 
-        // Also update the priority or add metadata if needed
-        if (!dashboard.workOrders[workOrderIndex].metadata) {
-            dashboard.workOrders[workOrderIndex].metadata = {};
-        }
-        
-        dashboard.workOrders[workOrderIndex].metadata.lastCallStatusUpdate = new Date().toISOString();
-        dashboard.workOrders[workOrderIndex].metadata.updatedBy = req.user?._id || 'system';
+        // Update workflow status
+        workOrder.workflowStatus = 'IN_PROGRESS';
+        workOrder.timerStarted = true;
+        workOrder.timerExpired = false;
 
-        // Save the updated dashboard
+        // Add metadata for tracking
+        if (!workOrder.metadata) {
+            workOrder.metadata = {};
+        }
+
+        workOrder.metadata.lastCallStatusUpdate = new Date();
+        workOrder.metadata.updatedBy = calledByName;
+        workOrder.metadata.updatedByEmail = calledByEmail;
+        workOrder.metadata.updatedAt = new Date();
+
+        // Save the dashboard
         await dashboard.save();
-
-        // Return the updated work order
-        const updatedWorkOrder = dashboard.workOrders[workOrderIndex];
+        console.log(`Work order ${workOrder.workOrderNumber} updated successfully`);
 
         res.json({
             success: true,
             message: `Work order call status updated successfully`,
             data: {
-                workOrder: updatedWorkOrder,
+                workOrder: workOrder,
                 updates: {
                     locatesCalled,
                     callType: callType?.toUpperCase(),
-                    calledAt: updatedWorkOrder.calledAt,
-                    calledBy: updatedWorkOrder.calledBy,
-                    completionDate: updatedWorkOrder.completionDate
+                    calledAt: workOrder.calledAt,
+                    calledBy: workOrder.calledBy,
+                    calledByEmail: workOrder.calledByEmail,
+                    completionDate: workOrder.completionDate,
+                    workflowStatus: workOrder.workflowStatus
                 }
             }
         });
@@ -266,548 +278,333 @@ const updateWorkOrderCallStatus = async (req, res) => {
     }
 };
 
-// NEW: Get excavator locates that need calls
-const getExcavatorLocatesNeedingCalls = async (req, res) => {
+const tagLocatesNeeded = async (req, res) => {
+    console.log('=== tagLocatesNeeded ===');
+    console.log('Request body:', req.body);
+
     try {
-        const dashboards = await DashboardData.find({
-            "workOrders.priorityName": { $regex: 'excavator', $options: 'i' }
-        });
+        const { workOrderNumber, name, email, tags } = req.body;
 
-        if (!dashboards || dashboards.length === 0) {
-            return res.json({
-                success: true,
-                total: 0,
-                data: []
-            });
-        }
-
-        // Extract excavator work orders that need calls
-        const excavatorLocates = [];
-        dashboards.forEach(dashboard => {
-            dashboard.workOrders.forEach(workOrder => {
-                if (workOrder.priorityName && 
-                    workOrder.priorityName.toUpperCase() === 'EXCAVATOR' &&
-                    !workOrder.locatesCalled) {
-                    
-                    excavatorLocates.push({
-                        ...workOrder.toObject(),
-                        dashboardId: dashboard._id
-                    });
-                }
-            });
-        });
-
-        res.json({
-            success: true,
-            total: excavatorLocates.length,
-            data: excavatorLocates
-        });
-
-    } catch (error) {
-        console.error('Error fetching excavator locates:', error);
-        res.status(500).json({
-            success: false,
-            message: error.message || 'Server error fetching excavator locates'
-        });
-    }
-};
-
-// NEW: Bulk update call status for multiple excavator locates
-const bulkUpdateCallStatus = async (req, res) => {
-    try {
-        const { ids, callType, calledBy } = req.body;
-
-        if (!Array.isArray(ids) || ids.length === 0) {
+        // Validate required fields
+        if (!workOrderNumber) {
             return res.status(400).json({
                 success: false,
-                message: "Please provide an array of work order IDs"
+                message: "Work order number is required"
             });
         }
 
-        if (!callType || !['STANDARD', 'EMERGENCY'].includes(callType.toUpperCase())) {
+        if (!name || !email) {
             return res.status(400).json({
                 success: false,
-                message: "callType must be either 'STANDARD' or 'EMERGENCY'"
+                message: "Name and email are required"
             });
         }
 
-        if (!calledBy) {
-            return res.status(400).json({
-                success: false,
-                message: "Manager name (calledBy) is required"
-            });
-        }
-
-        // Find dashboards containing the work orders
-        const dashboards = await DashboardData.find({
-            "workOrders._id": { $in: ids }
+        // Find dashboard containing the work order by workOrderNumber
+        const dashboard = await DashboardData.findOne({
+            "workOrders.workOrderNumber": workOrderNumber.toString()
         });
 
-        if (dashboards.length === 0) {
+        if (!dashboard) {
+            console.log(`Work order ${workOrderNumber} not found in database`);
             return res.status(404).json({
                 success: false,
-                message: "No matching work orders found"
+                message: `Work order ${workOrderNumber} not found`
             });
         }
 
-        const updatedCount = { total: 0, successful: 0, failed: 0 };
-        const updatePromises = [];
+        // Find the specific work order
+        const workOrderIndex = dashboard.workOrders.findIndex(
+            workOrder => workOrder.workOrderNumber.toString() === workOrderNumber.toString()
+        );
 
-        dashboards.forEach(dashboard => {
-            dashboard.workOrders.forEach((workOrder, index) => {
-                if (ids.includes(workOrder._id.toString())) {
-                    updatedCount.total++;
-                    
-                    // Only update excavator priority work orders or manually tagged ones
-                    if ((workOrder.priorityName && 
-                         workOrder.priorityName.toUpperCase() === 'EXCAVATOR') ||
-                        workOrder.manuallyTagged) {
-                        
-                        const updatePromise = (async () => {
-                            try {
-                                dashboard.workOrders[index].locatesCalled = true;
-                                dashboard.workOrders[index].callType = callType.toUpperCase();
-                                dashboard.workOrders[index].calledBy = calledBy;
-                                dashboard.workOrders[index].calledAt = new Date().toISOString();
-                                
-                                // Calculate completion date
-                                const calledDate = new Date();
-                                if (callType.toUpperCase() === 'EMERGENCY') {
-                                    dashboard.workOrders[index].completionDate = new Date(calledDate.getTime() + (4 * 60 * 60 * 1000));
-                                } else {
-                                    const completionDate = new Date(calledDate);
-                                    let businessDays = 2;
-                                    while (businessDays > 0) {
-                                        completionDate.setDate(completionDate.getDate() + 1);
-                                        if (completionDate.getDay() !== 0 && completionDate.getDay() !== 6) {
-                                            businessDays--;
-                                        }
-                                    }
-                                    dashboard.workOrders[index].completionDate = completionDate;
-                                }
-                                
-                                // Add metadata
-                                if (!dashboard.workOrders[index].metadata) {
-                                    dashboard.workOrders[index].metadata = {};
-                                }
-                                dashboard.workOrders[index].metadata.lastCallStatusUpdate = new Date().toISOString();
-                                dashboard.workOrders[index].metadata.updatedBy = req.user?._id || 'system';
-                                dashboard.workOrders[index].metadata.bulkUpdate = true;
-                                
-                                await dashboard.save();
-                                updatedCount.successful++;
-                            } catch (error) {
-                                console.error(`Failed to update work order ${workOrder._id}:`, error);
-                                updatedCount.failed++;
-                            }
-                        })();
-                        
-                        updatePromises.push(updatePromise);
-                    } else {
-                        updatedCount.failed++; // Not an excavator or manually tagged work order
-                    }
-                }
+        if (workOrderIndex === -1) {
+            console.log(`Work order ${workOrderNumber} not found in workOrders array`);
+            return res.status(404).json({
+                success: false,
+                message: "Work order not found in dashboard"
             });
-        });
+        }
 
-        await Promise.all(updatePromises);
+        // Update the work order with manual tag
+        const workOrder = dashboard.workOrders[workOrderIndex];
+        console.log(`Found work order: ${workOrder.workOrderNumber}`);
+
+        // Mark as manually tagged
+        workOrder.manuallyTagged = true;
+        workOrder.taggedBy = name;
+        workOrder.taggedByEmail = email;
+        workOrder.taggedAt = new Date();
+
+        // Update priority and type to show it's an excavator locate
+        workOrder.priorityName = 'EXCAVATOR';
+        workOrder.priorityColor = 'rgb(255, 102, 204)'; // Pink color for excavator priority
+        workOrder.type = 'EXCAVATOR'; // Set type to EXCAVATOR
+        workOrder.workflowStatus = 'CALL_NEEDED'; // Update workflow status
+
+        // Add or update tags
+        if (tags) {
+            workOrder.tags = workOrder.tags ?
+                `${workOrder.tags}, ${tags}`.replace(/^,\s*/, '') :
+                tags;
+        } else if (!workOrder.tags || !workOrder.tags.includes('Locates Needed')) {
+            workOrder.tags = workOrder.tags ?
+                `${workOrder.tags}, Locates Needed` :
+                'Locates Needed';
+        }
+
+        // Create metadata if not exists
+        if (!workOrder.metadata) {
+            workOrder.metadata = {};
+        }
+        workOrder.metadata.manuallyTaggedAt = new Date();
+        workOrder.metadata.tagAddedBy = name;
+        workOrder.metadata.tagAddedByEmail = email;
+        workOrder.metadata.tagUpdatedAt = new Date();
+
+        // Save the updated dashboard
+        await dashboard.save();
+
+        console.log(`Successfully tagged work order ${workOrderNumber} as Locates Needed`);
 
         res.json({
             success: true,
-            message: `Call status updated for ${updatedCount.successful} excavator locate(s)`,
+            message: `Work order ${workOrderNumber} tagged as 'Locates Needed' successfully`,
             data: {
-                totalRequested: ids.length,
-                totalProcessed: updatedCount.total,
-                successful: updatedCount.successful,
-                failed: updatedCount.failed,
-                callType: callType.toUpperCase(),
-                calledBy
+                workOrder: workOrder,
+                updates: {
+                    manuallyTagged: true,
+                    taggedBy: name,
+                    taggedByEmail: email,
+                    priorityName: workOrder.priorityName,
+                    type: workOrder.type,
+                    tags: workOrder.tags,
+                    workflowStatus: workOrder.workflowStatus
+                }
             }
         });
 
     } catch (error) {
-        console.error('Error in bulk update call status:', error);
+        console.error('Error tagging locates needed:', error);
         res.status(500).json({
             success: false,
-            message: error.message || 'Server error during bulk update'
+            message: error.message || 'Server error tagging locates needed'
         });
     }
 };
 
-// NEW: Manually tag locates needed
-const tagLocatesNeeded = async (req, res) => {
-    console.log('tagLocatesNeeded', req.body);
-    // try {
-    //     const { workOrderNumber, technician, taggedBy } = req.body;
+const bulkTagLocatesNeeded = async (req, res) => {
+    console.log('=== bulkTagLocatesNeeded ===');
+    console.log('Request body:', req.body);
 
-    //     // Validate required fields
-    //     if (!jobId || !customerName || !address) {
-    //         return res.status(400).json({
-    //             success: false,
-    //             message: "Job ID, Customer Name, and Address are required"
-    //         });
-    //     }
-
-    //     // Create a new work order with manual tag
-    //     const manualWorkOrder = {
-    //         workOrderNumber: jobId,
-    //         techName: technician || 'Unassigned',
-    //         technician: technician || 'Unassigned',
-    //         manuallyTagged: true,
-    //         taggedBy: taggedBy || req.user?.name || 'Unknown',
-    //         taggedAt: new Date().toISOString(),
-    //         metadata: {
-    //             createdBy: 'manual_tag',
-    //             createdAt: new Date().toISOString()
-    //         }
-    //     };
-
-    //     // Check if there's already a dashboard for today
-    //     const today = new Date();
-    //     today.setHours(0, 0, 0, 0);
-        
-    //     let dashboard = await DashboardData.findOne({
-    //         createdAt: { $gte: today }
-    //     });
-
-    //     if (!dashboard) {
-    //         // Create new dashboard for today
-    //         dashboard = new DashboardData({
-    //             workOrders: [manualWorkOrder],
-    //             totalWorkOrders: 1,
-    //             metadata: {
-    //                 hasManualTags: true
-    //             }
-    //         });
-    //     } else {
-    //         // Add to existing dashboard
-    //         dashboard.workOrders.push(manualWorkOrder);
-    //         dashboard.totalWorkOrders = dashboard.workOrders.length;
-    //         if (!dashboard.metadata) dashboard.metadata = {};
-    //         dashboard.metadata.hasManualTags = true;
-    //     }
-
-    //     await dashboard.save();
-
-    //     res.json({
-    //         success: true,
-    //         message: "Locates needed tag created successfully",
-    //         data: {
-    //             workOrder: manualWorkOrder,
-    //             dashboardId: dashboard._id
-    //         }
-    //     });
-
-    // } catch (error) {
-    //     console.error('Error creating manual tag:', error);
-    //     res.status(500).json({
-    //         success: false,
-    //         message: error.message || 'Server error creating manual tag'
-    //     });
-    // }
-};
-
-// NEW: Get all locates with timer status
-const getAllLocatesWithStatus = async (req, res) => {
     try {
-        const { status } = req.query; // Optional: 'call-needed', 'in-progress', 'complete'
+        const { workOrderNumbers, name, email, tags } = req.body;
 
-        const dashboards = await DashboardData.find().sort({ createdAt: -1 });
-
-        if (!dashboards || dashboards.length === 0) {
-            return res.json({
-                success: true,
-                total: 0,
-                data: []
+        // Validate required fields
+        if (!Array.isArray(workOrderNumbers) || workOrderNumbers.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Work order numbers array is required"
             });
         }
 
-        // Flatten all work orders
-        const allWorkOrders = [];
-        dashboards.forEach(dashboard => {
-            dashboard.workOrders.forEach(workOrder => {
-                const workOrderObj = workOrder.toObject();
-                
-                // Determine status
-                let workOrderStatus = 'unknown';
-                
-                if (workOrderObj.manuallyTagged || 
-                    (workOrderObj.priorityName && 
-                     workOrderObj.priorityName.toUpperCase() === 'EXCAVATOR' &&
-                     !workOrderObj.locatesCalled)) {
-                    workOrderStatus = 'call-needed';
-                } else if (workOrderObj.locatesCalled && workOrderObj.completionDate) {
-                    const now = new Date();
-                    const completionDate = new Date(workOrderObj.completionDate);
-                    
-                    if (completionDate > now) {
-                        workOrderStatus = 'in-progress';
-                    } else {
-                        workOrderStatus = 'complete';
-                    }
-                }
-                
-                allWorkOrders.push({
-                    ...workOrderObj,
-                    dashboardId: dashboard._id,
-                    status: workOrderStatus,
-                    // Calculate time remaining if in progress
-                    timeRemaining: workOrderStatus === 'in-progress' ? 
-                        Math.max(0, Math.ceil((completionDate - now) / (1000 * 60 * 60))) : null // hours
+        if (!name || !email) {
+            return res.status(400).json({
+                success: false,
+                message: "Name and email are required"
+            });
+        }
+
+        const results = {
+            successful: [],
+            failed: []
+        };
+
+        // Process each work order number
+        for (const workOrderNumber of workOrderNumbers) {
+            try {
+                // Find dashboard containing the work order
+                const dashboard = await DashboardData.findOne({
+                    "workOrders.workOrderNumber": workOrderNumber.toString()
                 });
-            });
-        });
 
-        // Filter by status if provided
-        let filteredWorkOrders = allWorkOrders;
-        if (status) {
-            filteredWorkOrders = allWorkOrders.filter(workOrder => workOrder.status === status);
+                if (!dashboard) {
+                    results.failed.push({
+                        workOrderNumber,
+                        reason: `Work order ${workOrderNumber} not found`
+                    });
+                    continue;
+                }
+
+                // Find the specific work order
+                const workOrderIndex = dashboard.workOrders.findIndex(
+                    workOrder => workOrder.workOrderNumber.toString() === workOrderNumber.toString()
+                );
+
+                if (workOrderIndex === -1) {
+                    results.failed.push({
+                        workOrderNumber,
+                        reason: "Work order not found in dashboard"
+                    });
+                    continue;
+                }
+
+                // Update the work order
+                const workOrder = dashboard.workOrders[workOrderIndex];
+
+                workOrder.manuallyTagged = true;
+                workOrder.taggedBy = name;
+                workOrder.taggedByEmail = email;
+                workOrder.taggedAt = new Date();
+
+                // Update priority and type
+                workOrder.priorityName = 'EXCAVATOR';
+                workOrder.priorityColor = 'rgb(255, 102, 204)';
+                workOrder.type = 'EXCAVATOR';
+                workOrder.workflowStatus = 'CALL_NEEDED';
+
+                if (tags) {
+                    workOrder.tags = workOrder.tags ?
+                        `${workOrder.tags}, ${tags}`.replace(/^,\s*/, '') :
+                        tags;
+                } else if (!workOrder.tags || !workOrder.tags.includes('Locates Needed')) {
+                    workOrder.tags = workOrder.tags ?
+                        `${workOrder.tags}, Locates Needed` :
+                        'Locates Needed';
+                }
+
+                if (!workOrder.metadata) {
+                    workOrder.metadata = {};
+                }
+                workOrder.metadata.manuallyTaggedAt = new Date();
+                workOrder.metadata.tagAddedBy = name;
+                workOrder.metadata.tagAddedByEmail = email;
+                workOrder.metadata.tagUpdatedAt = new Date();
+
+                await dashboard.save();
+
+                results.successful.push({
+                    workOrderNumber,
+                    message: "Successfully tagged"
+                });
+
+            } catch (error) {
+                results.failed.push({
+                    workOrderNumber,
+                    reason: error.message
+                });
+            }
         }
 
         res.json({
             success: true,
-            total: filteredWorkOrders.length,
-            filteredBy: status || 'all',
-            data: filteredWorkOrders
+            message: `Bulk tagging completed: ${results.successful.length} successful, ${results.failed.length} failed`,
+            data: results
         });
 
     } catch (error) {
-        console.error('Error fetching locates with status:', error);
+        console.error('Error in bulk tagging:', error);
         res.status(500).json({
             success: false,
-            message: error.message || 'Server error fetching locates with status'
+            message: error.message || 'Server error during bulk tagging'
         });
     }
 };
 
-// NEW: Get statistics for dashboard
-const getLocatesStatistics = async (req, res) => {
+// NEW: Function to auto-update expired timers
+const checkAndUpdateExpiredTimers = async (req, res) => {
     try {
-        const dashboards = await DashboardData.find().sort({ createdAt: -1 });
-
-        let callNeeded = 0;
-        let inProgress = 0;
-        let complete = 0;
-        let manualTags = 0;
-        let autoGenerated = 0;
-
         const now = new Date();
 
-        dashboards.forEach(dashboard => {
-            dashboard.workOrders.forEach(workOrder => {
-                // Count manual vs auto
-                if (workOrder.manuallyTagged) {
-                    manualTags++;
-                } else {
-                    autoGenerated++;
-                }
-
-                // Determine status
-                if (workOrder.manuallyTagged || 
-                    (workOrder.priorityName && 
-                     workOrder.priorityName.toUpperCase() === 'EXCAVATOR' &&
-                     !workOrder.locatesCalled)) {
-                    callNeeded++;
-                } else if (workOrder.locatesCalled && workOrder.completionDate) {
-                    const completionDate = new Date(workOrder.completionDate);
-                    
-                    if (completionDate > now) {
-                        inProgress++;
-                    } else {
-                        complete++;
-                    }
-                }
-            });
+        // Find all work orders that are in progress and have expired
+        const dashboards = await DashboardData.find({
+            "workOrders.locatesCalled": true,
+            "workOrders.timerExpired": false,
+            "workOrders.completionDate": { $lt: now }
         });
+
+        let expiredCount = 0;
+
+        for (const dashboard of dashboards) {
+            let needsSave = false;
+
+            for (const workOrder of dashboard.workOrders) {
+                if (workOrder.locatesCalled &&
+                    !workOrder.timerExpired &&
+                    workOrder.completionDate &&
+                    workOrder.completionDate < now) {
+
+                    workOrder.timerExpired = true;
+                    workOrder.workflowStatus = 'COMPLETE';
+
+                    if (!workOrder.metadata) {
+                        workOrder.metadata = {};
+                    }
+                    workOrder.metadata.timerExpiredAt = now;
+                    workOrder.metadata.autoUpdatedAt = now;
+
+                    needsSave = true;
+                    expiredCount++;
+                }
+            }
+
+            if (needsSave) {
+                await dashboard.save();
+            }
+        }
 
         res.json({
             success: true,
-            data: {
-                total: callNeeded + inProgress + complete,
-                callNeeded,
-                inProgress,
-                complete,
-                breakdown: {
-                    manualTags,
-                    autoGenerated
-                },
-                lastUpdated: new Date().toISOString()
-            }
+            message: `Updated ${expiredCount} expired work orders`,
+            expiredCount
         });
 
     } catch (error) {
-        console.error('Error fetching locates statistics:', error);
+        console.error('Error checking expired timers:', error);
         res.status(500).json({
             success: false,
-            message: error.message || 'Server error fetching statistics'
+            message: error.message || 'Server error checking expired timers'
         });
     }
 };
 
-// NEW: Clean up expired locates (auto-move from in-progress to complete)
-const cleanupExpiredLocates = async (req, res) => {
+// NEW: Get work order by number
+const getWorkOrderByNumber = async (req, res) => {
     try {
-        const dashboards = await DashboardData.find({
-            "workOrders.locatesCalled": true,
-            "workOrders.completionDate": { $lte: new Date() }
+        const { workOrderNumber } = req.params;
+
+        const dashboard = await DashboardData.findOne({
+            "workOrders.workOrderNumber": workOrderNumber.toString()
         });
 
-        if (dashboards.length === 0) {
-            return res.json({
-                success: true,
-                message: "No expired locates found",
-                updatedCount: 0
+        if (!dashboard) {
+            return res.status(404).json({
+                success: false,
+                message: `Work order ${workOrderNumber} not found`
             });
         }
 
-        let updatedCount = 0;
+        const workOrder = dashboard.workOrders.find(
+            wo => wo.workOrderNumber.toString() === workOrderNumber.toString()
+        );
 
-        const updatePromises = dashboards.map(dashboard => {
-            let hasChanges = false;
-            
-            dashboard.workOrders.forEach(workOrder => {
-                if (workOrder.locatesCalled && workOrder.completionDate) {
-                    const completionDate = new Date(workOrder.completionDate);
-                    const now = new Date();
-                    
-                    if (completionDate <= now) {
-                        // Mark as expired if not already
-                        if (!workOrder.metadata) workOrder.metadata = {};
-                        workOrder.metadata.expiredAt = now.toISOString();
-                        workOrder.metadata.autoMovedToComplete = true;
-                        hasChanges = true;
-                        updatedCount++;
-                    }
-                }
+        if (!workOrder) {
+            return res.status(404).json({
+                success: false,
+                message: "Work order not found in dashboard"
             });
-            
-            if (hasChanges) {
-                return dashboard.save();
-            }
-            return Promise.resolve();
-        });
-
-        await Promise.all(updatePromises);
+        }
 
         res.json({
             success: true,
-            message: `Cleaned up ${updatedCount} expired locate(s)`,
-            data: {
-                updatedCount,
-                timestamp: new Date().toISOString()
-            }
+            data: workOrder
         });
 
     } catch (error) {
-        console.error('Error cleaning up expired locates:', error);
+        console.error('Error getting work order:', error);
         res.status(500).json({
             success: false,
-            message: error.message || 'Server error cleaning up expired locates'
-        });
-    }
-};
-
-// NEW: Get in-progress locates with timer details
-const getInProgressLocates = async (req, res) => {
-    try {
-        const now = new Date();
-        const dashboards = await DashboardData.find({
-            "workOrders.locatesCalled": true,
-            "workOrders.completionDate": { $gt: now }
-        });
-
-        const inProgressLocates = [];
-
-        dashboards.forEach(dashboard => {
-            dashboard.workOrders.forEach(workOrder => {
-                if (workOrder.locatesCalled && workOrder.completionDate) {
-                    const completionDate = new Date(workOrder.completionDate);
-                    
-                    if (completionDate > now) {
-                        // Calculate time remaining
-                        const timeRemainingMs = completionDate - now;
-                        const hoursRemaining = Math.floor(timeRemainingMs / (1000 * 60 * 60));
-                        const minutesRemaining = Math.floor((timeRemainingMs % (1000 * 60 * 60)) / (1000 * 60));
-                        
-                        inProgressLocates.push({
-                            ...workOrder.toObject(),
-                            dashboardId: dashboard._id,
-                            timeRemaining: {
-                                hours: hoursRemaining,
-                                minutes: minutesRemaining,
-                                totalHours: Math.ceil(timeRemainingMs / (1000 * 60 * 60))
-                            },
-                            completionDate: completionDate.toISOString(),
-                            calledBy: workOrder.calledBy || 'Unknown',
-                            callType: workOrder.callType || 'STANDARD'
-                        });
-                    }
-                }
-            });
-        });
-
-        // Sort by soonest to expire
-        inProgressLocates.sort((a, b) => new Date(a.completionDate) - new Date(b.completionDate));
-
-        res.json({
-            success: true,
-            total: inProgressLocates.length,
-            data: inProgressLocates
-        });
-
-    } catch (error) {
-        console.error('Error fetching in-progress locates:', error);
-        res.status(500).json({
-            success: false,
-            message: error.message || 'Server error fetching in-progress locates'
-        });
-    }
-};
-
-// NEW: Get completed locates (timer expired)
-const getCompletedLocates = async (req, res) => {
-    try {
-        const now = new Date();
-        const dashboards = await DashboardData.find({
-            "workOrders.locatesCalled": true,
-            "workOrders.completionDate": { $lte: now }
-        });
-
-        const completedLocates = [];
-
-        dashboards.forEach(dashboard => {
-            dashboard.workOrders.forEach(workOrder => {
-                if (workOrder.locatesCalled && workOrder.completionDate) {
-                    const completionDate = new Date(workOrder.completionDate);
-                    
-                    if (completionDate <= now) {
-                        completedLocates.push({
-                            ...workOrder.toObject(),
-                            dashboardId: dashboard._id,
-                            completedAt: completionDate.toISOString(),
-                            calledBy: workOrder.calledBy || 'Unknown',
-                            callType: workOrder.callType || 'STANDARD',
-                            timeSinceCompletion: Math.floor((now - completionDate) / (1000 * 60 * 60)) // hours since completion
-                        });
-                    }
-                }
-            });
-        });
-
-        // Sort by most recently completed
-        completedLocates.sort((a, b) => new Date(b.completionDate) - new Date(a.completionDate));
-
-        res.json({
-            success: true,
-            total: completedLocates.length,
-            data: completedLocates
-        });
-
-    } catch (error) {
-        console.error('Error fetching completed locates:', error);
-        res.status(500).json({
-            success: false,
-            message: error.message || 'Server error fetching completed locates'
+            message: error.message || 'Server error getting work order'
         });
     }
 };
@@ -819,12 +616,8 @@ module.exports = {
     deleteWorkOrder,
     bulkDeleteWorkOrders,
     updateWorkOrderCallStatus,
-    getExcavatorLocatesNeedingCalls,
-    bulkUpdateCallStatus,
-    tagLocatesNeeded, // NEW
-    getAllLocatesWithStatus, // NEW
-    getLocatesStatistics, // NEW
-    cleanupExpiredLocates, // NEW
-    getInProgressLocates, // NEW
-    getCompletedLocates // NEW
+    tagLocatesNeeded,
+    bulkTagLocatesNeeded,
+    checkAndUpdateExpiredTimers,
+    getWorkOrderByNumber,
 };

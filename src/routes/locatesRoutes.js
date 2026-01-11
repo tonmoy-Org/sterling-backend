@@ -1,41 +1,36 @@
 const express = require('express');
-const { 
-    getAllDashboardData, 
-    syncDashboard, 
-    deleteWorkOrder, 
-    bulkDeleteWorkOrders, 
-    syncAssignedDashboard,
-    updateWorkOrderCallStatus,
-    getExcavatorLocatesNeedingCalls,
-    bulkUpdateCallStatus,
-    tagLocatesNeeded,
-    getAllLocatesWithStatus,
-    getLocatesStatistics,
-    cleanupExpiredLocates,
-    getInProgressLocates,
-    getCompletedLocates
-} = require('../controllers/locatesController');
-
 const router = express.Router();
+const {
+    syncDashboard,
+    syncAssignedDashboard,
+    getAllDashboardData,
+    deleteWorkOrder,
+    bulkDeleteWorkOrders,
+    updateWorkOrderCallStatus,
+    tagLocatesNeeded,
+    bulkTagLocatesNeeded,
+    checkAndUpdateExpiredTimers,
+    getWorkOrderByNumber
+} = require('../controllers/locatesController');
+const auth = require('../middleware/auth');
+
+// Protect all routes
+router.use(auth.protect);
 
 // Existing routes
-router.get('/all-locates', getAllDashboardData);
 router.get('/sync-dashboard', syncDashboard);
 router.get('/sync-assigned-dashboard', syncAssignedDashboard);
-router.delete('/delete-locate/:id', deleteWorkOrder);
+router.get('/all-locates', getAllDashboardData);
 router.delete('/work-order/bulk-delete', bulkDeleteWorkOrders);
-
-// NEW ROUTES for excavator locate call status
+router.delete('/work-order/:id', deleteWorkOrder);
 router.patch('/work-order/:id/update-call-status', updateWorkOrderCallStatus);
-router.get('/excavator-needing-calls', getExcavatorLocatesNeedingCalls);
-router.post('/work-order/bulk-update-call-status', bulkUpdateCallStatus);
 
-// NEW ROUTES for three-stage workflow
+// NEW: Manual tagging routes
 router.post('/tag-locates-needed', tagLocatesNeeded);
-router.get('/all-with-status', getAllLocatesWithStatus);
-router.get('/statistics', getLocatesStatistics);
-router.post('/cleanup-expired', cleanupExpiredLocates);
-router.get('/in-progress', getInProgressLocates);
-router.get('/completed', getCompletedLocates);
+router.post('/bulk-tag-locates-needed', bulkTagLocatesNeeded);
+
+// Timer and work order management routes
+router.get('/check-expired-timers', checkAndUpdateExpiredTimers);
+router.get('/work-order/:workOrderNumber', getWorkOrderByNumber);
 
 module.exports = router;
