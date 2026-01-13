@@ -21,13 +21,29 @@ const getAllDashboardData = async (req, res) => {
 
 const syncDashboard = async (req, res) => {
     try {
-        const data = await scrapeLocatesDispatchBoard();
-        console.log('Scraped Data:', data);
+        let data = await scrapeLocatesDispatchBoard();
+
+        // Filter only EXCAVATOR
+        let filtered = data.workOrders.filter(w => w.priorityName === "EXCAVATOR");
+
+        // Deduplicate by workOrderNumber
+        let unique = [];
+        let seen = new Set();
+
+        for (let w of filtered) {
+            if (!seen.has(w.workOrderNumber)) {
+                seen.add(w.workOrderNumber);
+                unique.push(w);
+            }
+        }
+
+        data.workOrders = unique;
+
         const saved = await DashboardData.create(data);
 
         res.json({
             success: true,
-            message: 'Dashboard synced successfully',
+            message: "Dashboard synced successfully",
             data: saved
         });
     } catch (error) {
@@ -37,16 +53,34 @@ const syncDashboard = async (req, res) => {
         });
     }
 };
+
 
 const syncAssignedDashboard = async (req, res) => {
     try {
-        const data = await assignedLocatesDispatchBoard();
-        console.log('Scraped Data:', data);
+        let data = await assignedLocatesDispatchBoard();
+
+        if (Array.isArray(data?.workOrders)) {
+            let filtered = data.workOrders.filter(w => w.priorityName === "EXCAVATOR");
+
+            const seen = new Set();
+            const unique = [];
+
+            for (const w of filtered) {
+                if (!seen.has(w.workOrderNumber)) {
+                    seen.add(w.workOrderNumber);
+                    unique.push(w);
+                }
+            }
+
+            data.workOrders = unique;
+            data.totalWorkOrders = unique.length;
+        }
+
         const saved = await DashboardData.create(data);
 
         res.json({
             success: true,
-            message: 'Dashboard synced successfully',
+            message: "Dashboard synced successfully",
             data: saved
         });
     } catch (error) {
@@ -56,28 +90,62 @@ const syncAssignedDashboard = async (req, res) => {
         });
     }
 };
+
 
 const deleteWorkOrder = async (req, res) => {
     try {
         const { id } = req.params;
 
-        const updated = await DashboardData.findOneAndUpdate(
-            { "workOrders._id": id },
-            { $pull: { workOrders: { _id: id } } },
-            { new: true }
-        );
+        const dashboard = await DashboardData.findOne({
+            "workOrders._id": id
+        });
 
-        if (!updated) {
+        if (!dashboard) {
             return res.status(404).json({
                 success: false,
                 message: "Work order not found"
             });
         }
 
+        const workOrderIndex = dashboard.workOrders.findIndex(
+            wo => wo._id.toString() === id
+        );
+
+        if (workOrderIndex === -1) {
+            return res.status(404).json({
+                success: false,
+                message: "Work order not found"
+            });
+        }
+
+        const workOrderToDelete = dashboard.workOrders[workOrderIndex];
+
+        if (!dashboard.deletedWorkOrders) {
+            dashboard.deletedWorkOrders = [];
+        }
+
+        dashboard.deletedWorkOrders.push({
+            ...workOrderToDelete.toObject(),
+            deletedAt: new Date(),
+            deletedBy: req.user?.name || 'Unknown User',
+            deletedByEmail: req.user?.email || 'unknown@email.com',
+            deletedFrom: 'Dashboard',
+            isPermanentlyDeleted: false,
+            originalWorkOrderId: workOrderToDelete._id
+        });
+
+        dashboard.workOrders.splice(workOrderIndex, 1);
+        dashboard.totalWorkOrders = dashboard.workOrders.length;
+
+        await dashboard.save();
+
         res.json({
             success: true,
-            message: "Work order deleted successfully",
-            data: updated
+            message: "Work order moved to recycle bin successfully",
+            data: {
+                dashboard: dashboard,
+                deletedWorkOrder: workOrderToDelete
+            }
         });
 
     } catch (error) {
@@ -90,9 +158,8 @@ const deleteWorkOrder = async (req, res) => {
 
 const bulkDeleteWorkOrders = async (req, res) => {
     const { ids } = req.body;
-    console.log('=== bulkDeleteWorkOrders ===');
-    try {
 
+    try {
         if (!Array.isArray(ids) || ids.length === 0) {
             return res.status(400).json({
                 success: false,
@@ -111,21 +178,42 @@ const bulkDeleteWorkOrders = async (req, res) => {
             });
         }
 
-        const updatePromises = dashboards.map(dashboard => {
-            const initialCount = dashboard.workOrders.length;
+        let deletedCount = 0;
+
+        for (const dashboard of dashboards) {
+            if (!dashboard.deletedWorkOrders) {
+                dashboard.deletedWorkOrders = [];
+            }
+
+            const workOrdersToDelete = dashboard.workOrders.filter(
+                workOrder => ids.includes(workOrder._id.toString())
+            );
+
+            workOrdersToDelete.forEach(workOrder => {
+                dashboard.deletedWorkOrders.push({
+                    ...workOrder.toObject(),
+                    deletedAt: new Date(),
+                    deletedBy: req.user?.name || 'Unknown User',
+                    deletedByEmail: req.user?.email || 'unknown@email.com',
+                    deletedFrom: 'Dashboard',
+                    isPermanentlyDeleted: false,
+                    originalWorkOrderId: workOrder._id
+                });
+                deletedCount++;
+            });
+
             dashboard.workOrders = dashboard.workOrders.filter(
                 workOrder => !ids.includes(workOrder._id.toString())
             );
             dashboard.totalWorkOrders = dashboard.workOrders.length;
-            return dashboard.save();
-        });
 
-        await Promise.all(updatePromises);
+            await dashboard.save();
+        }
 
         res.json({
             success: true,
-            message: `${ids.length} work order(s) deleted successfully`,
-            deletedCount: ids.length
+            message: `${deletedCount} work order(s) moved to recycle bin successfully`,
+            deletedCount: deletedCount
         });
 
     } catch (error) {
@@ -141,12 +229,6 @@ const updateWorkOrderCallStatus = async (req, res) => {
         const { id } = req.params;
         const { locatesCalled, callType, calledAt } = req.body;
 
-        console.log(`=== updateWorkOrderCallStatus ===`);
-        console.log(`User: ${req.user?.name || 'Unknown'}`);
-        console.log(`User email: ${req.user?.email || 'No email'}`);
-        console.log(`Body:`, req.body);
-
-        // Get manager info from authenticated user
         const calledByName = req.user?.name || req.body.calledBy || 'Unknown Manager';
         const calledByEmail = req.user?.email || req.body.calledByEmail || 'unknown@email.com';
 
@@ -164,81 +246,64 @@ const updateWorkOrderCallStatus = async (req, res) => {
             });
         }
 
-        // Find the dashboard containing the work order
         const dashboard = await DashboardData.findOne({
             "workOrders._id": id
         });
 
         if (!dashboard) {
-            console.log(`Work order ${id} not found in any dashboard`);
             return res.status(404).json({
                 success: false,
                 message: "Work order not found"
             });
         }
 
-        // Find the specific work order
         const workOrderIndex = dashboard.workOrders.findIndex(
             workOrder => workOrder._id.toString() === id
         );
 
         if (workOrderIndex === -1) {
-            console.log(`Work order ${id} not found in dashboard workOrders array`);
             return res.status(404).json({
                 success: false,
                 message: "Work order not found in dashboard"
             });
         }
 
-        // Get the work order
         const workOrder = dashboard.workOrders[workOrderIndex];
-        console.log(`Found work order: ${workOrder.workOrderNumber}`);
 
-        // Update the work order
         workOrder.locatesCalled = locatesCalled;
 
         if (callType) {
             workOrder.callType = callType.toUpperCase();
-            workOrder.type = callType.toUpperCase(); // Also update the type field
+            workOrder.type = callType.toUpperCase();
         }
 
-        // Set caller information
         workOrder.calledBy = calledByName;
         workOrder.calledByEmail = calledByEmail;
 
-        // Set calledAt time
         const calledAtDate = calledAt ? new Date(calledAt) : new Date();
         workOrder.calledAt = calledAtDate;
 
-        // Calculate completion date based on call type
         if (callType?.toUpperCase() === 'EMERGENCY') {
-            // Emergency: 4 hours from called time
             workOrder.completionDate = new Date(calledAtDate.getTime() + (4 * 60 * 60 * 1000));
-            console.log(`Emergency locate - Completion in 4 hours`);
         } else {
-            // Standard: 2 business days from called time
             const completionDate = new Date(calledAtDate);
             let businessDays = 2;
 
             while (businessDays > 0) {
                 completionDate.setDate(completionDate.getDate() + 1);
 
-                // Skip weekends (0 = Sunday, 6 = Saturday)
                 if (completionDate.getDay() !== 0 && completionDate.getDay() !== 6) {
                     businessDays--;
                 }
             }
 
             workOrder.completionDate = completionDate;
-            console.log(`Standard locate - Completion in 2 business days: ${completionDate}`);
         }
 
-        // Update workflow status
         workOrder.workflowStatus = 'IN_PROGRESS';
         workOrder.timerStarted = true;
         workOrder.timerExpired = false;
 
-        // Add metadata for tracking
         if (!workOrder.metadata) {
             workOrder.metadata = {};
         }
@@ -248,9 +313,7 @@ const updateWorkOrderCallStatus = async (req, res) => {
         workOrder.metadata.updatedByEmail = calledByEmail;
         workOrder.metadata.updatedAt = new Date();
 
-        // Save the dashboard
         await dashboard.save();
-        console.log(`Work order ${workOrder.workOrderNumber} updated successfully`);
 
         res.json({
             success: true,
@@ -270,7 +333,6 @@ const updateWorkOrderCallStatus = async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error updating work order call status:', error);
         res.status(500).json({
             success: false,
             message: error.message || 'Server error updating call status'
@@ -278,245 +340,10 @@ const updateWorkOrderCallStatus = async (req, res) => {
     }
 };
 
-const tagLocatesNeeded = async (req, res) => {
-    console.log('=== tagLocatesNeeded ===');
-    console.log('Request body:', req.body);
-
-    try {
-        const { workOrderNumber, name, email, tags } = req.body;
-
-        // Validate required fields
-        if (!workOrderNumber) {
-            return res.status(400).json({
-                success: false,
-                message: "Work order number is required"
-            });
-        }
-
-        if (!name || !email) {
-            return res.status(400).json({
-                success: false,
-                message: "Name and email are required"
-            });
-        }
-
-        // Find dashboard containing the work order by workOrderNumber
-        const dashboard = await DashboardData.findOne({
-            "workOrders.workOrderNumber": workOrderNumber.toString()
-        });
-
-        if (!dashboard) {
-            console.log(`Work order ${workOrderNumber} not found in database`);
-            return res.status(404).json({
-                success: false,
-                message: `Work order ${workOrderNumber} not found`
-            });
-        }
-
-        // Find the specific work order
-        const workOrderIndex = dashboard.workOrders.findIndex(
-            workOrder => workOrder.workOrderNumber.toString() === workOrderNumber.toString()
-        );
-
-        if (workOrderIndex === -1) {
-            console.log(`Work order ${workOrderNumber} not found in workOrders array`);
-            return res.status(404).json({
-                success: false,
-                message: "Work order not found in dashboard"
-            });
-        }
-
-        // Update the work order with manual tag
-        const workOrder = dashboard.workOrders[workOrderIndex];
-        console.log(`Found work order: ${workOrder.workOrderNumber}`);
-
-        // Mark as manually tagged
-        workOrder.manuallyTagged = true;
-        workOrder.taggedBy = name;
-        workOrder.taggedByEmail = email;
-        workOrder.taggedAt = new Date();
-
-        // Update priority and type to show it's an excavator locate
-        workOrder.priorityName = 'EXCAVATOR';
-        workOrder.priorityColor = 'rgb(255, 102, 204)'; // Pink color for excavator priority
-        workOrder.type = 'EXCAVATOR'; // Set type to EXCAVATOR
-        workOrder.workflowStatus = 'CALL_NEEDED'; // Update workflow status
-
-        // Add or update tags
-        if (tags) {
-            workOrder.tags = workOrder.tags ?
-                `${workOrder.tags}, ${tags}`.replace(/^,\s*/, '') :
-                tags;
-        } else if (!workOrder.tags || !workOrder.tags.includes('Locates Needed')) {
-            workOrder.tags = workOrder.tags ?
-                `${workOrder.tags}, Locates Needed` :
-                'Locates Needed';
-        }
-
-        // Create metadata if not exists
-        if (!workOrder.metadata) {
-            workOrder.metadata = {};
-        }
-        workOrder.metadata.manuallyTaggedAt = new Date();
-        workOrder.metadata.tagAddedBy = name;
-        workOrder.metadata.tagAddedByEmail = email;
-        workOrder.metadata.tagUpdatedAt = new Date();
-
-        // Save the updated dashboard
-        await dashboard.save();
-
-        console.log(`Successfully tagged work order ${workOrderNumber} as Locates Needed`);
-
-        res.json({
-            success: true,
-            message: `Work order ${workOrderNumber} tagged as 'Locates Needed' successfully`,
-            data: {
-                workOrder: workOrder,
-                updates: {
-                    manuallyTagged: true,
-                    taggedBy: name,
-                    taggedByEmail: email,
-                    priorityName: workOrder.priorityName,
-                    type: workOrder.type,
-                    tags: workOrder.tags,
-                    workflowStatus: workOrder.workflowStatus
-                }
-            }
-        });
-
-    } catch (error) {
-        console.error('Error tagging locates needed:', error);
-        res.status(500).json({
-            success: false,
-            message: error.message || 'Server error tagging locates needed'
-        });
-    }
-};
-
-const bulkTagLocatesNeeded = async (req, res) => {
-    console.log('=== bulkTagLocatesNeeded ===');
-    console.log('Request body:', req.body);
-
-    try {
-        const { workOrderNumbers, name, email, tags } = req.body;
-
-        // Validate required fields
-        if (!Array.isArray(workOrderNumbers) || workOrderNumbers.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "Work order numbers array is required"
-            });
-        }
-
-        if (!name || !email) {
-            return res.status(400).json({
-                success: false,
-                message: "Name and email are required"
-            });
-        }
-
-        const results = {
-            successful: [],
-            failed: []
-        };
-
-        // Process each work order number
-        for (const workOrderNumber of workOrderNumbers) {
-            try {
-                // Find dashboard containing the work order
-                const dashboard = await DashboardData.findOne({
-                    "workOrders.workOrderNumber": workOrderNumber.toString()
-                });
-
-                if (!dashboard) {
-                    results.failed.push({
-                        workOrderNumber,
-                        reason: `Work order ${workOrderNumber} not found`
-                    });
-                    continue;
-                }
-
-                // Find the specific work order
-                const workOrderIndex = dashboard.workOrders.findIndex(
-                    workOrder => workOrder.workOrderNumber.toString() === workOrderNumber.toString()
-                );
-
-                if (workOrderIndex === -1) {
-                    results.failed.push({
-                        workOrderNumber,
-                        reason: "Work order not found in dashboard"
-                    });
-                    continue;
-                }
-
-                // Update the work order
-                const workOrder = dashboard.workOrders[workOrderIndex];
-
-                workOrder.manuallyTagged = true;
-                workOrder.taggedBy = name;
-                workOrder.taggedByEmail = email;
-                workOrder.taggedAt = new Date();
-
-                // Update priority and type
-                workOrder.priorityName = 'EXCAVATOR';
-                workOrder.priorityColor = 'rgb(255, 102, 204)';
-                workOrder.type = 'EXCAVATOR';
-                workOrder.workflowStatus = 'CALL_NEEDED';
-
-                if (tags) {
-                    workOrder.tags = workOrder.tags ?
-                        `${workOrder.tags}, ${tags}`.replace(/^,\s*/, '') :
-                        tags;
-                } else if (!workOrder.tags || !workOrder.tags.includes('Locates Needed')) {
-                    workOrder.tags = workOrder.tags ?
-                        `${workOrder.tags}, Locates Needed` :
-                        'Locates Needed';
-                }
-
-                if (!workOrder.metadata) {
-                    workOrder.metadata = {};
-                }
-                workOrder.metadata.manuallyTaggedAt = new Date();
-                workOrder.metadata.tagAddedBy = name;
-                workOrder.metadata.tagAddedByEmail = email;
-                workOrder.metadata.tagUpdatedAt = new Date();
-
-                await dashboard.save();
-
-                results.successful.push({
-                    workOrderNumber,
-                    message: "Successfully tagged"
-                });
-
-            } catch (error) {
-                results.failed.push({
-                    workOrderNumber,
-                    reason: error.message
-                });
-            }
-        }
-
-        res.json({
-            success: true,
-            message: `Bulk tagging completed: ${results.successful.length} successful, ${results.failed.length} failed`,
-            data: results
-        });
-
-    } catch (error) {
-        console.error('Error in bulk tagging:', error);
-        res.status(500).json({
-            success: false,
-            message: error.message || 'Server error during bulk tagging'
-        });
-    }
-};
-
-// NEW: Function to auto-update expired timers
 const checkAndUpdateExpiredTimers = async (req, res) => {
     try {
         const now = new Date();
 
-        // Find all work orders that are in progress and have expired
         const dashboards = await DashboardData.find({
             "workOrders.locatesCalled": true,
             "workOrders.timerExpired": false,
@@ -560,7 +387,6 @@ const checkAndUpdateExpiredTimers = async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error checking expired timers:', error);
         res.status(500).json({
             success: false,
             message: error.message || 'Server error checking expired timers'
@@ -568,7 +394,6 @@ const checkAndUpdateExpiredTimers = async (req, res) => {
     }
 };
 
-// NEW: Get work order by number
 const getWorkOrderByNumber = async (req, res) => {
     try {
         const { workOrderNumber } = req.params;
@@ -601,10 +426,414 @@ const getWorkOrderByNumber = async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error getting work order:', error);
         res.status(500).json({
             success: false,
             message: error.message || 'Server error getting work order'
+        });
+    }
+};
+
+const completeWorkOrderManually = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const dashboard = await DashboardData.findOne({
+            "workOrders._id": id
+        });
+
+        if (!dashboard) {
+            return res.status(404).json({
+                success: false,
+                message: "Work order not found"
+            });
+        }
+
+        const workOrder = dashboard.workOrders.find(
+            wo => wo._id.toString() === id
+        );
+
+        if (!workOrder) {
+            return res.status(404).json({
+                success: false,
+                message: "Work order not found in dashboard"
+            });
+        }
+
+        if (workOrder.workflowStatus === 'COMPLETE') {
+            return res.status(400).json({
+                success: false,
+                message: "Work order is already completed"
+            });
+        }
+
+        workOrder.workflowStatus = 'COMPLETE';
+        workOrder.timerExpired = false;
+        workOrder.timerStarted = false;
+
+        if (!workOrder.metadata) {
+            workOrder.metadata = {};
+        }
+
+        workOrder.metadata.completedManually = true;
+        workOrder.metadata.completedAt = new Date();
+        workOrder.metadata.completedBy = req.user?.name || 'Unknown User';
+        workOrder.metadata.completedByEmail = req.user?.email || 'unknown@email.com';
+
+        workOrder.completionDate = new Date();
+
+        await dashboard.save();
+
+        res.json({
+            success: true,
+            message: "Work order marked as COMPLETE successfully",
+            data: workOrder
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message || 'Server error completing work order'
+        });
+    }
+};
+
+const getDeletedHistory = async (req, res) => {
+    try {
+        const { page = 1, limit = 20, search = '' } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const dashboards = await DashboardData.find({
+            "deletedWorkOrders.0": { $exists: true }
+        });
+
+        let allDeletedWorkOrders = [];
+
+        dashboards.forEach(dashboard => {
+            if (dashboard.deletedWorkOrders && dashboard.deletedWorkOrders.length > 0) {
+                dashboard.deletedWorkOrders.forEach(deletedOrder => {
+                    if (!deletedOrder.isPermanentlyDeleted) {
+                        allDeletedWorkOrders.push({
+                            ...deletedOrder,
+                            dashboardId: dashboard._id,
+                            dashboardName: dashboard.name || `Dashboard ${dashboard._id}`,
+                            dashboardCreatedAt: dashboard.createdAt,
+                            _id: deletedOrder._id || deletedOrder.originalWorkOrderId
+                        });
+                    }
+                });
+            }
+        });
+
+        if (search) {
+            const searchLower = search.toLowerCase();
+            allDeletedWorkOrders = allDeletedWorkOrders.filter(item =>
+                item.workOrderNumber?.toLowerCase().includes(searchLower) ||
+                item.customerName?.toLowerCase().includes(searchLower) ||
+                item.customerAddress?.toLowerCase().includes(searchLower) ||
+                item.deletedBy?.toLowerCase().includes(searchLower)
+            );
+        }
+
+        allDeletedWorkOrders.sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt));
+
+        const total = allDeletedWorkOrders.length;
+        const paginatedData = allDeletedWorkOrders.slice(skip, skip + parseInt(limit));
+
+        res.json({
+            success: true,
+            data: paginatedData,
+            pagination: {
+                currentPage: parseInt(page),
+                totalPages: Math.ceil(total / limit),
+                totalRecords: total,
+                limit: parseInt(limit)
+            }
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+};
+
+const getDashboardWithHistory = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const dashboard = await DashboardData.findById(id);
+
+        if (!dashboard) {
+            return res.status(404).json({
+                success: false,
+                message: "Dashboard not found"
+            });
+        }
+
+        res.json({
+            success: true,
+            data: {
+                dashboard: dashboard,
+                activeWorkOrders: dashboard.workOrders || [],
+                deletedWorkOrders: dashboard.deletedWorkOrders?.filter(order => !order.isPermanentlyDeleted) || [],
+                permanentlyDeletedWorkOrders: dashboard.deletedWorkOrders?.filter(order => order.isPermanentlyDeleted) || []
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+};
+
+const restoreWorkOrder = async (req, res) => {
+    try {
+        const { dashboardId, deletedOrderId } = req.params;
+
+        const dashboard = await DashboardData.findById(dashboardId);
+
+        if (!dashboard) {
+            return res.status(404).json({
+                success: false,
+                message: "Dashboard not found"
+            });
+        }
+
+        if (!dashboard.deletedWorkOrders || dashboard.deletedWorkOrders.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "No deleted work orders found"
+            });
+        }
+
+        const deletedOrderIndex = dashboard.deletedWorkOrders.findIndex(
+            order => (order._id?.toString() === deletedOrderId ||
+                order.originalWorkOrderId?.toString() === deletedOrderId)
+                && !order.isPermanentlyDeleted
+        );
+
+        if (deletedOrderIndex === -1) {
+            return res.status(404).json({
+                success: false,
+                message: "Deleted work order not found or already permanently deleted"
+            });
+        }
+
+        const workOrderToRestore = dashboard.deletedWorkOrders[deletedOrderIndex];
+
+        const restoredWorkOrder = {
+            priorityColor: workOrderToRestore.priorityColor || '',
+            priorityName: workOrderToRestore.priorityName || '',
+            workOrderNumber: workOrderToRestore.workOrderNumber || '',
+            customerPO: workOrderToRestore.customerPO || '',
+            customerName: workOrderToRestore.customerName || '',
+            customerAddress: workOrderToRestore.customerAddress || '',
+            tags: workOrderToRestore.tags || '',
+            techName: workOrderToRestore.techName || '',
+            promisedAppointment: workOrderToRestore.promisedAppointment || '',
+            createdDate: workOrderToRestore.createdDate || '',
+            requestedDate: workOrderToRestore.requestedDate || '',
+            completedDate: workOrderToRestore.completedDate || '',
+            task: workOrderToRestore.task || '',
+            taskDuration: workOrderToRestore.taskDuration || '',
+            purchaseStatus: workOrderToRestore.purchaseStatus || '',
+            purchaseStatusName: workOrderToRestore.purchaseStatusName || '',
+            serial: workOrderToRestore.serial || 0,
+            assigned: workOrderToRestore.assigned || false,
+            dispatched: workOrderToRestore.dispatched || false,
+            scheduled: workOrderToRestore.scheduled || false,
+            scheduledDate: workOrderToRestore.scheduledDate || '',
+            locatesCalled: workOrderToRestore.locatesCalled || false,
+            callType: workOrderToRestore.callType || null,
+            calledAt: workOrderToRestore.calledAt || null,
+            calledBy: workOrderToRestore.calledBy || '',
+            calledByEmail: workOrderToRestore.calledByEmail || '',
+            completionDate: workOrderToRestore.completionDate || null,
+            timerStarted: workOrderToRestore.timerStarted || false,
+            timerExpired: workOrderToRestore.timerExpired || false,
+            timeRemaining: workOrderToRestore.timeRemaining || '',
+            workflowStatus: workOrderToRestore.workflowStatus || 'UNKNOWN',
+            type: workOrderToRestore.type || 'STANDARD',
+            _id: workOrderToRestore.originalWorkOrderId || workOrderToRestore._id,
+            metadata: {
+                ...workOrderToRestore.metadata,
+                restored: true,
+                restoredAt: new Date(),
+                restoredBy: req.user?.name || 'Unknown User',
+                restoredByEmail: req.user?.email || 'unknown@email.com'
+            }
+        };
+
+        dashboard.workOrders.push(restoredWorkOrder);
+        dashboard.totalWorkOrders = dashboard.workOrders.length;
+
+        dashboard.deletedWorkOrders.splice(deletedOrderIndex, 1);
+
+        await dashboard.save();
+
+        res.json({
+            success: true,
+            message: "Work order restored successfully",
+            data: {
+                dashboard: dashboard,
+                restoredWorkOrder: restoredWorkOrder
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+};
+
+const permanentlyDeleteFromHistory = async (req, res) => {
+    try {
+        const { dashboardId, deletedOrderId } = req.params;
+
+        const dashboard = await DashboardData.findById(dashboardId);
+
+        if (!dashboard) {
+            return res.status(404).json({
+                success: false,
+                message: "Dashboard not found"
+            });
+        }
+
+        if (!dashboard.deletedWorkOrders || dashboard.deletedWorkOrders.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "No deleted work orders found"
+            });
+        }
+
+        const deletedOrderIndex = dashboard.deletedWorkOrders.findIndex(
+            order => order._id.toString() === deletedOrderId ||
+                order.originalWorkOrderId?.toString() === deletedOrderId
+        );
+
+        if (deletedOrderIndex === -1) {
+            return res.status(404).json({
+                success: false,
+                message: "Deleted work order not found"
+            });
+        }
+
+        const permanentlyDeletedItem = dashboard.deletedWorkOrders.splice(deletedOrderIndex, 1)[0];
+
+        await dashboard.save();
+
+        res.json({
+            success: true,
+            message: "Work order permanently deleted from database",
+            data: permanentlyDeletedItem
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+};
+
+const bulkPermanentlyDelete = async (req, res) => {
+    try {
+        const { ids } = req.body;
+
+        if (!Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Please provide an array of deleted work order IDs"
+            });
+        }
+
+        let permanentlyDeletedCount = 0;
+        const deletedItems = [];
+
+        const dashboards = await DashboardData.find({
+            "deletedWorkOrders._id": { $in: ids }
+        });
+
+        if (dashboards.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "No matching deleted work orders found"
+            });
+        }
+
+        for (const dashboard of dashboards) {
+            if (!dashboard.deletedWorkOrders || dashboard.deletedWorkOrders.length === 0) {
+                continue;
+            }
+
+            const originalLength = dashboard.deletedWorkOrders.length;
+
+            dashboard.deletedWorkOrders = dashboard.deletedWorkOrders.filter(order => {
+                if (ids.includes(order._id.toString()) ||
+                    (order.originalWorkOrderId && ids.includes(order.originalWorkOrderId.toString()))) {
+                    permanentlyDeletedCount++;
+                    deletedItems.push({
+                        ...order.toObject(),
+                        dashboardId: dashboard._id,
+                        dashboardName: dashboard.name || `Dashboard ${dashboard._id}`
+                    });
+                    return false;
+                }
+                return true;
+            });
+
+            if (originalLength !== dashboard.deletedWorkOrders.length) {
+                await dashboard.save();
+            }
+        }
+
+        res.json({
+            success: true,
+            message: `${permanentlyDeletedCount} record(s) permanently deleted from database`,
+            deletedCount: permanentlyDeletedCount,
+            deletedItems: deletedItems.slice(0, 10)
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+};
+
+const clearAllHistory = async (req, res) => {
+    try {
+        const dashboards = await DashboardData.find({
+            "deletedWorkOrders.0": { $exists: true }
+        });
+
+        let clearedCount = 0;
+
+        for (const dashboard of dashboards) {
+            if (dashboard.deletedWorkOrders && dashboard.deletedWorkOrders.length > 0) {
+                clearedCount += dashboard.deletedWorkOrders.length;
+
+                dashboard.deletedWorkOrders = [];
+
+                await dashboard.save();
+            }
+        }
+
+        res.json({
+            success: true,
+            message: `${clearedCount} history records permanently deleted from database`,
+            clearedCount
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
         });
     }
 };
@@ -615,9 +844,14 @@ module.exports = {
     getAllDashboardData,
     deleteWorkOrder,
     bulkDeleteWorkOrders,
-    updateWorkOrderCallStatus,
-    tagLocatesNeeded,
-    bulkTagLocatesNeeded,
     checkAndUpdateExpiredTimers,
     getWorkOrderByNumber,
+    updateWorkOrderCallStatus,
+    completeWorkOrderManually,
+    getDeletedHistory,
+    restoreWorkOrder,
+    permanentlyDeleteFromHistory,
+    bulkPermanentlyDelete,
+    clearAllHistory,
+    getDashboardWithHistory
 };

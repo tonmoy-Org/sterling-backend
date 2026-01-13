@@ -81,8 +81,8 @@ async function assignedLocatesDispatchBoard() {
   // 🔍 Filters
   await selectStatus(page, 'Assigned');
 
-  const startDate = formatDate('2025-12-01');
-  const endDate = formatDate('2025-12-31');
+  const startDate = formatDate('2026-01-14');
+  const endDate = formatDate('2026-01-14');
 
   await setDateFilter(page, startDate, endDate);
   await applyFilters(page);
